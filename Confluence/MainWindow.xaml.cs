@@ -2,6 +2,7 @@
 using System.IO;
 using System.Windows;
 using Confluence.Properties;
+using log4net;
 using OpenQA.Selenium;
 using OpenQA.Selenium.Firefox;
 
@@ -15,6 +16,8 @@ namespace Confluence
         private FirefoxDriver _driver;
         private const string Notes = @"Note: This page was imported from share point." +
             "The original document had been attached as an attachment.\r\n";
+
+        private ILog _logger = LogManager.GetLogger(typeof(MainWindow));
 
         public MainWindow()
         {
@@ -52,32 +55,82 @@ namespace Confluence
             _driver = new FirefoxDriver();
 
             Login();
-            
-            GotoSpaceRootPage();
 
             foreach (var file in dirInfo.EnumerateFiles("*.*", SearchOption.AllDirectories))
             {
+                var pageName = Path.GetFileNameWithoutExtension(file.Name);
+                if (DoesPageExist(pageName))
+                {
+                    pageName = string.Format("Conflict page {0} {1}", pageName, Guid.NewGuid().ToString());
+                    _logger.InfoFormat("Page for {0} already exists, create as {1}", 
+                        file.Name, pageName);
+                }
+
+                GotoSpaceRootPage();
                 var fileExt = file.Extension.ToLowerInvariant();
                 if (fileExt == ".doc" || fileExt == ".docx")
                 {
                     CreateParentPages(file.DirectoryName);
                     ImportWordDoc(file.FullName);
+                    File.Move(file.FullName, Path.Combine(file.DirectoryName, file.Name + ".migrated"));
                 }
                 else if (fileExt == ".xls" || fileExt == "xlsx")
                 {
                     CreateParentPages(file.DirectoryName);
-                    CreatePage(Path.GetFileNameWithoutExtension(file.Name), Notes);
+                    CreatePage(pageName, Notes);
                     AttachTheOriginalFile(file.FullName);
+                    AddMacroForAttachment(MacroType.Excel, file.Name);
+                    File.Move(file.FullName, Path.Combine(file.DirectoryName, file.Name + ".migrated"));
                 }
                 else if (fileExt == ".pdf")
                 {
                     CreateParentPages(file.DirectoryName);
-                    CreatePage(Path.GetFileNameWithoutExtension(file.Name), Notes);
+                    CreatePage(pageName, Notes);
                     AttachTheOriginalFile(file.FullName);
+                    AddMacroForAttachment(MacroType.Pdf, file.Name);
+                    File.Move(file.FullName, Path.Combine(file.DirectoryName, file.Name + ".migrated"));
                 }
             }
         }
 
+        private enum MacroType
+        {
+            Pdf,
+            Excel
+        };
+        private void AddMacroForAttachment(MacroType macro, string fileName)
+        {
+            PerformActionWithRetry(() =>
+            {
+                _driver.FindElementById("editPageLink").Click();
+            });
+
+            PerformActionWithRetry(() =>
+            {
+                _driver.SwitchTo().Frame("wysiwygTextarea_ifr");
+            });
+
+            var textarea = _driver.FindElementById("tinymce");
+            textarea.Click();
+            textarea.SendKeys(OpenQA.Selenium.Keys.Control + OpenQA.Selenium.Keys.End);
+            _driver.SwitchTo().ParentFrame();
+
+            _driver.FindElementById("insert-menu").Click();
+
+            _driver.FindElementById("rte-insert-macro").Click();
+
+            _driver.FindElementById("macro-browser-search").SendKeys(macro.ToString());
+            _driver.FindElementById("macro-browser-search").SendKeys(OpenQA.Selenium.Keys.Enter);
+            if (macro == MacroType.Pdf)
+            {
+                _driver.FindElementById("macro-viewpdf").Click();
+            }
+            else
+            {
+                _driver.FindElementById("macro-viewxls").Click();
+            }
+            _driver.FindElementById("macro-param-name").SendKeys(fileName); 
+        }
         private void CreateParentPages(string filePath)
         {
             var parentPage = GetSpaceRootUrl();
@@ -182,6 +235,7 @@ namespace Confluence
                 var createPageBtn = _driver.FindElement(By.Id("quick-create-page-button"));
                 createPageBtn.Click();
             });
+
 
             _driver.FindElement(By.Id("content-title")).SendKeys(pageName);
             _driver.SwitchTo().Frame("wysiwygTextarea_ifr");
