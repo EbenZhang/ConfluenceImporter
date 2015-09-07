@@ -43,6 +43,83 @@ namespace Confluence
             if (exception != null) throw exception;
         }
 
+        public abstract class FileImporter
+        {
+            private FirefoxDriver _driver;
+
+            protected FileImporter(FirefoxDriver driver)
+            {
+                _driver = driver;
+            }
+
+            public void Import(FirefoxDriver driver, FileInfo file)
+            {
+                CreateParentPages(file.DirectoryName);
+            }
+
+            private void CreateParentPages(string filePath)
+            {
+                var parentPage = GetSpaceRootUrl();
+                var directories = filePath.Replace(Settings.Default.ImportFrom, "")
+                    .Split(new[] { Path.DirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (var dir in directories)
+                {
+                    var exists = DoesPageExist(dir);
+                    if (!exists)
+                    {
+                        GotoPage(parentPage);
+
+                        CreatePage(dir, "");
+                    }
+
+                    parentPage = dir;
+                }
+            }
+
+            private bool DoesPageExist(string pageName)
+            {
+                GotoPage(pageName);
+                bool exists = false;
+                try
+                {
+                    IWebElement pageTitle = null;
+                    PerformActionWithRetry(() => { pageTitle = _driver.FindElementById("title-text"); });
+                    exists = pageTitle.Text != "Page Not Found";
+                }
+                catch
+                {
+                    // ignored
+                }
+                return exists;
+            }
+
+            private void GotoPage(string pageName)
+            {
+                var pagePath = GetSpaceRootUrl() + "/" + pageName;
+                _driver.Navigate().GoToUrl(pagePath);
+            }
+            private void CreatePage(string pageName, string pageContent)
+            {
+                PerformActionWithRetry(() =>
+                {
+                    var createPageBtn = _driver.FindElement(By.Id("quick-create-page-button"));
+                    createPageBtn.Click();
+                });
+
+
+                _driver.FindElement(By.Id("content-title")).SendKeys(pageName);
+                _driver.SwitchTo().Frame("wysiwygTextarea_ifr");
+                _driver.FindElement(By.Id("tinymce")).SendKeys(pageContent);
+                _driver.SwitchTo().ParentFrame();
+                SavePage();
+            }
+            private void SavePage()
+            {
+                _driver.FindElement(By.Id("rte-button-publish")).Click();
+            }
+            protected abstract void DoImport();
+        }
+
         private void ButtonBase_OnClick(object sender, RoutedEventArgs e)
         {
             DirectoryInfo dirInfo = new DirectoryInfo(Settings.Default.ImportFrom);
@@ -58,6 +135,10 @@ namespace Confluence
 
             foreach (var file in dirInfo.EnumerateFiles("*.*", SearchOption.AllDirectories))
             {
+                if (file.Extension == ".migrated")
+                {
+                    continue;
+                }
                 var pageName = Path.GetFileNameWithoutExtension(file.Name);
                 if (DoesPageExist(pageName))
                 {
@@ -74,7 +155,7 @@ namespace Confluence
                     ImportWordDoc(file.FullName);
                     File.Move(file.FullName, Path.Combine(file.DirectoryName, file.Name + ".migrated"));
                 }
-                else if (fileExt == ".xls" || fileExt == "xlsx")
+                else if (fileExt == ".xls" || fileExt == ".xlsx")
                 {
                     CreateParentPages(file.DirectoryName);
                     CreatePage(pageName, Notes);
@@ -90,7 +171,12 @@ namespace Confluence
                     AddMacroForAttachment(MacroType.Pdf, file.Name);
                     File.Move(file.FullName, Path.Combine(file.DirectoryName, file.Name + ".migrated"));
                 }
+                else if (fileExt == ".jpg" || fileExt == ".jpeg" || fileExt == ".png")
+                {
+                    
+                }
             }
+
         }
 
         private enum MacroType
@@ -115,12 +201,11 @@ namespace Confluence
             textarea.SendKeys(OpenQA.Selenium.Keys.Control + OpenQA.Selenium.Keys.End);
             _driver.SwitchTo().ParentFrame();
 
-            _driver.FindElementById("insert-menu").Click();
+            _driver.FindElementById("rte-button-insert").Click();
 
             _driver.FindElementById("rte-insert-macro").Click();
 
             _driver.FindElementById("macro-browser-search").SendKeys(macro.ToString());
-            _driver.FindElementById("macro-browser-search").SendKeys(OpenQA.Selenium.Keys.Enter);
             if (macro == MacroType.Pdf)
             {
                 _driver.FindElementById("macro-viewpdf").Click();
@@ -129,48 +214,8 @@ namespace Confluence
             {
                 _driver.FindElementById("macro-viewxls").Click();
             }
-            _driver.FindElementById("macro-param-name").SendKeys(fileName); 
-        }
-        private void CreateParentPages(string filePath)
-        {
-            var parentPage = GetSpaceRootUrl();
-            var directories = filePath.Replace(Settings.Default.ImportFrom, "")
-                .Split(new[] {Path.DirectorySeparatorChar}, StringSplitOptions.RemoveEmptyEntries);
-            foreach (var dir in directories)
-            {
-                var exists = DoesPageExist(dir);
-                if (!exists)
-                {
-                    GotoPage(parentPage);
-
-                    CreatePage(dir, "");
-                }
-
-                parentPage = dir;
-            }
-        }
-
-        private bool DoesPageExist(string pageName)
-        {
-            GotoPage(pageName);
-            bool exists = false;
-            try
-            {
-                IWebElement pageTitle = null;
-                PerformActionWithRetry(() => { pageTitle = _driver.FindElementById("title-text"); });
-                exists = pageTitle.Text != "Page Not Found";
-            }
-            catch
-            {
-                // ignored
-            }
-            return exists;
-        }
-
-        private void GotoPage(string pageName)
-        {
-            var pagePath = GetSpaceRootUrl() + "/" + pageName;
-            _driver.Navigate().GoToUrl(pagePath);
+            _driver.FindElementByCssSelector(".button-panel-button.ok").Click(); 
+            _driver.FindElementById("rte-button-publish").Click();
         }
 
         private void ImportWordDoc(string wordDocPath)
@@ -228,26 +273,7 @@ namespace Confluence
             PerformActionWithRetry(() => { _driver.FindElement(By.Id("importwordform")).Submit(); });
         }
 
-        private void CreatePage(string pageName, string pageContent)
-        {
-            PerformActionWithRetry(() =>
-            {
-                var createPageBtn = _driver.FindElement(By.Id("quick-create-page-button"));
-                createPageBtn.Click();
-            });
-
-
-            _driver.FindElement(By.Id("content-title")).SendKeys(pageName);
-            _driver.SwitchTo().Frame("wysiwygTextarea_ifr");
-            _driver.FindElement(By.Id("tinymce")).SendKeys(pageContent);
-            _driver.SwitchTo().ParentFrame();
-            SavePage();
-        }
-
-        private void SavePage()
-        {
-            _driver.FindElement(By.Id("rte-button-publish")).Click();
-        }
+        
 
         private void NavigateToImportWordDocPage()
         {
