@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using Confluence.Properties;
@@ -8,16 +9,13 @@ using OpenQA.Selenium.Firefox;
 
 namespace Confluence
 {
-    /// <summary>
-    /// Interaction logic for MainWindow.xaml
-    /// </summary>
-    public partial class MainWindow : Window
+    public partial class MainWindow 
     {
         private FirefoxDriver _driver;
         private const string Notes = @"Note: This page was imported from share point." +
             "The original document had been attached as an attachment.\r\n";
 
-        private ILog _logger = LogManager.GetLogger(typeof(MainWindow));
+        private readonly ILog _logger = LogManager.GetLogger(typeof(MainWindow));
 
         public MainWindow()
         {
@@ -43,18 +41,21 @@ namespace Confluence
             if (exception != null) throw exception;
         }
 
-        public abstract class FileImporter
+        public abstract class AbstractFileImporter
         {
-            private FirefoxDriver _driver;
+            protected FirefoxDriver _driver;
 
-            protected FileImporter(FirefoxDriver driver)
+            protected AbstractFileImporter(FirefoxDriver driver)
             {
                 _driver = driver;
             }
 
-            public void Import(FirefoxDriver driver, FileInfo file)
+            public void Import(FileInfo file, string asPage)
             {
                 CreateParentPages(file.DirectoryName);
+                DoImport(file, asPage);
+                Debug.Assert(file.DirectoryName != null, "file.DirectoryName != null");
+                File.Move(file.FullName, Path.Combine(file.DirectoryName, file.Name + ".migrated"));
             }
 
             private void CreateParentPages(string filePath)
@@ -75,15 +76,18 @@ namespace Confluence
                     parentPage = dir;
                 }
             }
-
             private bool DoesPageExist(string pageName)
             {
-                GotoPage(pageName);
+                return DoesPageExist(_driver, pageName);
+            }
+            public static bool DoesPageExist(FirefoxDriver driver, string pageName)
+            {
+                GotoPage(driver, pageName);
                 bool exists = false;
                 try
                 {
                     IWebElement pageTitle = null;
-                    PerformActionWithRetry(() => { pageTitle = _driver.FindElementById("title-text"); });
+                    PerformActionWithRetry(() => { pageTitle = driver.FindElementById("title-text"); });
                     exists = pageTitle.Text != "Page Not Found";
                 }
                 catch
@@ -95,10 +99,14 @@ namespace Confluence
 
             private void GotoPage(string pageName)
             {
-                var pagePath = GetSpaceRootUrl() + "/" + pageName;
-                _driver.Navigate().GoToUrl(pagePath);
+                GotoPage(_driver, pageName);
             }
-            private void CreatePage(string pageName, string pageContent)
+            private static void GotoPage(FirefoxDriver driver, string pageName)
+            {
+                var pagePath = GetSpaceRootUrl() + "/" + pageName;
+                driver.Navigate().GoToUrl(pagePath);
+            }
+            protected void CreatePage(string pageName, string pageContent)
             {
                 PerformActionWithRetry(() =>
                 {
@@ -113,16 +121,210 @@ namespace Confluence
                 _driver.SwitchTo().ParentFrame();
                 SavePage();
             }
+            
             private void SavePage()
             {
                 _driver.FindElement(By.Id("rte-button-publish")).Click();
             }
-            protected abstract void DoImport();
+
+            protected void AddNotesToPageToSayTheFileWasImportedFromSharepoint()
+            {
+                PerformActionWithRetry(() =>
+                {
+                    _driver.FindElementById("editPageLink").Click();
+                });
+
+                PerformActionWithRetry(() =>
+                {
+                    _driver.SwitchTo().Frame("wysiwygTextarea_ifr");
+                });
+
+                var textarea = _driver.FindElementById("tinymce");
+                textarea.Click();
+                textarea.SendKeys(Keys.Control + Keys.Home);
+
+                textarea.SendKeys(Notes);
+                _driver.SwitchTo().ParentFrame();
+                SavePage();
+            }
+            protected void AttachTheOriginalFile(string filePath)
+            {
+                NavigateToUploadAttachmentPage();
+                PerformActionWithRetry(() =>
+                {
+                    _driver.FindElementById("file_0").SendKeys(filePath);
+                });
+
+                _driver.FindElementById("upload-attachments").Submit();
+                _driver.FindElementById("viewPageLink").Click();
+            }
+            private void NavigateToUploadAttachmentPage()
+            {
+                OpenActionMenuOfPage();
+                _driver.FindElement(By.Id("view-attachments-link")).Click();
+            }
+
+            protected void NavigateToImportWordDocPage()
+            {
+                OpenActionMenuOfPage();
+                _driver.FindElement(By.Id("import-word-doc")).Click();
+            }
+
+            private void OpenActionMenuOfPage()
+            {
+                PerformActionWithRetry(() => { _driver.FindElement(By.Id("action-menu-link")).Click(); });
+            }
+
+            public static void GotoSpaceRootPage(FirefoxDriver _driver)
+            {
+                var spaceRoot = GetSpaceRootUrl();
+                _driver.Navigate().GoToUrl(spaceRoot);
+            }
+
+            private static string GetSpaceRootUrl()
+            {
+                var wikiUrl = Settings.Default.WikiBaseUrl;
+                var spaceRoot = wikiUrl + "/display/" + Settings.Default.SpaceName;
+                return spaceRoot;
+            }
+
+            protected abstract void DoImport(FileInfo file, string asPage);
+        }
+
+        class WordDocImporter : AbstractFileImporter
+        {
+            public WordDocImporter(FirefoxDriver driver) : base(driver)
+            {
+            }
+
+            protected override void DoImport(FileInfo file, string asPage)
+            {
+                ImportWordDoc(file.FullName);
+            }
+
+            private void ImportWordDoc(string wordDocPath)
+            {
+                NavigateToImportWordDocPage();
+                DoImportWordDoc(wordDocPath);
+                AttachTheOriginalFile(wordDocPath);
+                AddNotesToPageToSayTheFileWasImportedFromSharepoint();
+            }
+            private void DoImportWordDoc(string wordDocPath)
+            {
+                PerformActionWithRetry(() => { _driver.FindElement(By.Id("filename")).SendKeys(wordDocPath); });
+                _driver.FindElement(By.Id("next")).Click();
+
+                PerformActionWithRetry(() => { _driver.FindElement(By.Id("importwordform")).Submit(); });
+            }
+        }
+
+        class MacroableFileImporter : AbstractFileImporter
+        {
+            public MacroableFileImporter(FirefoxDriver driver) : base(driver)
+            {
+            }
+
+            protected override void DoImport(FileInfo file, string asPage)
+            {
+                CreatePage(asPage, Notes);
+                AttachTheOriginalFile(file.FullName);
+                AddMacroForAttachment(GetMacroType(file.Extension.ToLowerInvariant()), file.Name);
+                Debug.Assert(file.DirectoryName != null, "file.DirectoryName != null");
+                File.Move(file.FullName, Path.Combine(file.DirectoryName, file.Name + ".migrated"));
+            }
+
+            private static MacroType GetMacroType(string fileExt)
+            {
+                if(fileExt == ".xls" || fileExt == ".xlsx")
+                {
+                    return MacroType.Excel;
+                }
+                return MacroType.Pdf;
+            }
+
+            private enum MacroType
+            {
+                Pdf,
+                Excel
+            };
+
+            private void AddMacroForAttachment(MacroType macro, string fileName)
+            {
+                PerformActionWithRetry(() =>
+                {
+                    _driver.FindElementById("editPageLink").Click();
+                });
+
+                PerformActionWithRetry(() =>
+                {
+                    _driver.SwitchTo().Frame("wysiwygTextarea_ifr");
+                });
+
+                var textarea = _driver.FindElementById("tinymce");
+                textarea.Click();
+                textarea.SendKeys(Keys.Control + Keys.End);
+                _driver.SwitchTo().ParentFrame();
+
+                _driver.FindElementById("rte-button-insert").Click();
+
+                _driver.FindElementById("rte-insert-macro").Click();
+
+                _driver.FindElementById("macro-browser-search").SendKeys(macro.ToString());
+                if (macro == MacroType.Pdf)
+                {
+                    _driver.FindElementById("macro-viewpdf").Click();
+                }
+                else
+                {
+                    _driver.FindElementById("macro-viewxls").Click();
+                }
+                _driver.FindElementByCssSelector(".button-panel-button.ok").Click();
+                _driver.FindElementById("rte-button-publish").Click();
+            }
+        }
+
+        class ImageImporter : AbstractFileImporter
+        {
+            public ImageImporter(FirefoxDriver driver) : base(driver)
+            {
+            }
+
+            protected override void DoImport(FileInfo file, string asPage)
+            {
+                CreatePage(asPage, Notes);
+                AttachTheOriginalFile(file.FullName);
+                ShowImageInPage();
+            }
+
+            private void ShowImageInPage()
+            {
+                PerformActionWithRetry(() =>
+                {
+                    _driver.FindElementByCssSelector("#confluence-insert-files a .toolbar-trigger.aui-button")
+                        .Click();
+                });
+                _driver.FindElementsByCssSelector("#attached-files ul.file-list li.attached-file")[0].Click();
+                _driver.FindElementByCssSelector(".button-panel-button.insert").Click();
+                _driver.FindElementById("rte-button-publish").Click();
+            }
+        }
+
+        class RegularFileImporter : AbstractFileImporter
+        {
+            public RegularFileImporter(FirefoxDriver driver) : base(driver)
+            {
+            }
+
+            protected override void DoImport(FileInfo file, string asPage)
+            {
+                CreatePage(asPage, Notes);
+                AttachTheOriginalFile(file.FullName); 
+            }
         }
 
         private void ButtonBase_OnClick(object sender, RoutedEventArgs e)
         {
-            DirectoryInfo dirInfo = new DirectoryInfo(Settings.Default.ImportFrom);
+            var dirInfo = new DirectoryInfo(Settings.Default.ImportFrom);
             if (!dirInfo.Exists)
             {
                 MessageBox.Show(this, string.Format("Folder {0} does not exist", Settings.Default.ImportFrom));
@@ -140,163 +342,49 @@ namespace Confluence
                     continue;
                 }
                 var pageName = Path.GetFileNameWithoutExtension(file.Name);
-                if (DoesPageExist(pageName))
+                if (AbstractFileImporter.DoesPageExist(_driver, pageName))
                 {
-                    pageName = string.Format("Conflict page {0} {1}", pageName, Guid.NewGuid().ToString());
+                    pageName = string.Format("Conflict page {0} {1}", file.Name, Guid.NewGuid().ToString());
                     _logger.InfoFormat("Page for {0} already exists, create as {1}", 
                         file.Name, pageName);
                 }
 
-                GotoSpaceRootPage();
-                var fileExt = file.Extension.ToLowerInvariant();
-                if (fileExt == ".doc" || fileExt == ".docx")
+                AbstractFileImporter.GotoSpaceRootPage(_driver);
+
+                var importer = GetImporter(file);
+                if(importer != null)
                 {
-                    CreateParentPages(file.DirectoryName);
-                    ImportWordDoc(file.FullName);
-                    File.Move(file.FullName, Path.Combine(file.DirectoryName, file.Name + ".migrated"));
-                }
-                else if (fileExt == ".xls" || fileExt == ".xlsx")
-                {
-                    CreateParentPages(file.DirectoryName);
-                    CreatePage(pageName, Notes);
-                    AttachTheOriginalFile(file.FullName);
-                    AddMacroForAttachment(MacroType.Excel, file.Name);
-                    File.Move(file.FullName, Path.Combine(file.DirectoryName, file.Name + ".migrated"));
-                }
-                else if (fileExt == ".pdf")
-                {
-                    CreateParentPages(file.DirectoryName);
-                    CreatePage(pageName, Notes);
-                    AttachTheOriginalFile(file.FullName);
-                    AddMacroForAttachment(MacroType.Pdf, file.Name);
-                    File.Move(file.FullName, Path.Combine(file.DirectoryName, file.Name + ".migrated"));
-                }
-                else if (fileExt == ".jpg" || fileExt == ".jpeg" || fileExt == ".png")
-                {
-                    
+                    importer.Import(file, pageName);
                 }
             }
-
         }
 
-        private enum MacroType
+        private AbstractFileImporter GetImporter(FileSystemInfo file)
         {
-            Pdf,
-            Excel
-        };
-        private void AddMacroForAttachment(MacroType macro, string fileName)
-        {
-            PerformActionWithRetry(() =>
+            AbstractFileImporter importer = null;
+            var fileExt = file.Extension.ToLowerInvariant();
+            switch (fileExt)
             {
-                _driver.FindElementById("editPageLink").Click();
-            });
-
-            PerformActionWithRetry(() =>
-            {
-                _driver.SwitchTo().Frame("wysiwygTextarea_ifr");
-            });
-
-            var textarea = _driver.FindElementById("tinymce");
-            textarea.Click();
-            textarea.SendKeys(OpenQA.Selenium.Keys.Control + OpenQA.Selenium.Keys.End);
-            _driver.SwitchTo().ParentFrame();
-
-            _driver.FindElementById("rte-button-insert").Click();
-
-            _driver.FindElementById("rte-insert-macro").Click();
-
-            _driver.FindElementById("macro-browser-search").SendKeys(macro.ToString());
-            if (macro == MacroType.Pdf)
-            {
-                _driver.FindElementById("macro-viewpdf").Click();
+                case ".doc":
+                case ".docx":
+                    importer = new WordDocImporter(_driver);
+                    break;
+                case ".xls":
+                case ".xlsx":
+                case ".pdf":
+                    importer = new MacroableFileImporter(_driver);
+                    break;
+                case ".jpg":
+                case ".jpeg":
+                case ".png":
+                    importer = new ImageImporter(_driver);
+                    break;
+                case ".vsd":
+                case ".vsdx":
+                    importer = new RegularFileImporter(_driver);
+                    break;
             }
-            else
-            {
-                _driver.FindElementById("macro-viewxls").Click();
-            }
-            _driver.FindElementByCssSelector(".button-panel-button.ok").Click(); 
-            _driver.FindElementById("rte-button-publish").Click();
-        }
-
-        private void ImportWordDoc(string wordDocPath)
-        {
-            NavigateToImportWordDocPage();
-            DoImportWordDoc(wordDocPath);
-            AttachTheOriginalFile(wordDocPath);
-            AddNotesToPageToSayTheFileWasImportedFromSharepoint();
-        }
-
-        private void AddNotesToPageToSayTheFileWasImportedFromSharepoint()
-        {
-            PerformActionWithRetry(() =>
-            {
-                _driver.FindElementById("editPageLink").Click();
-            });
-
-            PerformActionWithRetry(() =>
-            {
-                _driver.SwitchTo().Frame("wysiwygTextarea_ifr");
-            });
-
-            var textarea = _driver.FindElementById("tinymce");
-            textarea.Click();
-            textarea.SendKeys(OpenQA.Selenium.Keys.Control + OpenQA.Selenium.Keys.Home);
-
-            textarea.SendKeys(Notes);
-            _driver.SwitchTo().ParentFrame();
-            SavePage();
-        }
-
-        private void AttachTheOriginalFile(string filePath)
-        {
-            NavigateToUploadAttachmentPage();
-            PerformActionWithRetry(() =>
-            {
-                _driver.FindElementById("file_0").SendKeys(filePath);
-            });
-
-            _driver.FindElementById("upload-attachments").Submit();
-            _driver.FindElementById("viewPageLink").Click();
-        }
-
-        private void NavigateToUploadAttachmentPage()
-        {
-            OpenActionMenuOfPage();
-            _driver.FindElement(By.Id("view-attachments-link")).Click();
-        }
-
-        private void DoImportWordDoc(string wordDocPath)
-        {
-            PerformActionWithRetry(() => { _driver.FindElement(By.Id("filename")).SendKeys(wordDocPath); });
-            _driver.FindElement(By.Id("next")).Click();
-
-            PerformActionWithRetry(() => { _driver.FindElement(By.Id("importwordform")).Submit(); });
-        }
-
-        
-
-        private void NavigateToImportWordDocPage()
-        {
-            OpenActionMenuOfPage();
-            _driver.FindElement(By.Id("import-word-doc")).Click();
-        }
-
-        private void OpenActionMenuOfPage()
-        {
-            PerformActionWithRetry(() => { _driver.FindElement(By.Id("action-menu-link")).Click(); });
-        }
-
-        private void GotoSpaceRootPage()
-        {
-            var spaceRoot = GetSpaceRootUrl();
-            _driver.Navigate().GoToUrl(spaceRoot);
-        }
-
-        private static string GetSpaceRootUrl()
-        {
-            var wikiUrl = Settings.Default.WikiBaseUrl;
-            var spaceRoot = wikiUrl + "/display/" + Settings.Default.SpaceName;
-            return spaceRoot;
+            return importer;
         }
 
         private void Login()
@@ -308,11 +396,11 @@ namespace Confluence
             PerformActionWithRetry(() =>
             {
                 var usernameId = Settings.Default.IsTesting ? "os_username" : "username";
-                _driver.FindElement(By.Id(usernameId)).SendKeys(Properties.Settings.Default.UserName);
+                _driver.FindElement(By.Id(usernameId)).SendKeys(Settings.Default.UserName);
             });
 
             var passwordId = Settings.Default.IsTesting ? "os_password" : "password";
-            _driver.FindElement(By.Id(passwordId)).SendKeys(Properties.Settings.Default.Password);
+            _driver.FindElement(By.Id(passwordId)).SendKeys(Settings.Default.Password);
 
             var loginBtnId = Settings.Default.IsTesting ? "loginButton" : "login";
             _driver.FindElement(By.Id(loginBtnId)).Click();
