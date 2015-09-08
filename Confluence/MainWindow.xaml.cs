@@ -55,7 +55,7 @@ namespace Confluence
                 CreateParentPages(file.DirectoryName);
                 DoImport(file, asPage);
                 Debug.Assert(file.DirectoryName != null, "file.DirectoryName != null");
-                File.Move(file.FullName, Path.Combine(file.DirectoryName, file.Name + ".migrated"));
+                file.MoveTo(Path.Combine(file.DirectoryName, file.Name + ".migrated"));
             }
 
             private void CreateParentPages(string filePath)
@@ -88,7 +88,15 @@ namespace Confluence
                 {
                     IWebElement pageTitle = null;
                     PerformActionWithRetry(() => { pageTitle = driver.FindElementById("title-text"); });
-                    exists = pageTitle.Text != "Page Not Found";
+                    // Space Tools is the page to recover a deleted page.
+                    exists = pageTitle.Text != "Page Not Found" && pageTitle.Text != "Space Tools";
+                    if (exists)
+                    {
+                        // in case the page is in another space. 
+                        // confluence shows the title with the correct page name
+                        // but the page does not exist.
+                        exists = driver.FindElementByCssSelector("div#content div.aui-message p.title").Text != "Page Not Found";
+                    }
                 }
                 catch
                 {
@@ -114,8 +122,10 @@ namespace Confluence
                     createPageBtn.Click();
                 });
 
-
-                _driver.FindElement(By.Id("content-title")).SendKeys(pageName);
+                PerformActionWithRetry(() =>
+                {
+                    _driver.FindElement(By.Id("content-title")).SendKeys(pageName);
+                });
                 _driver.SwitchTo().Frame("wysiwygTextarea_ifr");
                 _driver.FindElement(By.Id("tinymce")).SendKeys(pageContent);
                 _driver.SwitchTo().ParentFrame();
@@ -199,22 +209,25 @@ namespace Confluence
 
             protected override void DoImport(FileInfo file, string asPage)
             {
-                ImportWordDoc(file.FullName);
+                ImportWordDoc(file.FullName, asPage);
             }
 
-            private void ImportWordDoc(string wordDocPath)
+            private void ImportWordDoc(string wordDocPath, string asPage)
             {
+                CreatePage(asPage, "");
                 NavigateToImportWordDocPage();
-                DoImportWordDoc(wordDocPath);
+                DoImportWordDoc(wordDocPath, asPage);
                 AttachTheOriginalFile(wordDocPath);
                 AddNotesToPageToSayTheFileWasImportedFromSharepoint();
             }
-            private void DoImportWordDoc(string wordDocPath)
+            private void DoImportWordDoc(string wordDocPath, string pageName)
             {
                 PerformActionWithRetry(() => { _driver.FindElement(By.Id("filename")).SendKeys(wordDocPath); });
                 _driver.FindElement(By.Id("next")).Click();
-
-                PerformActionWithRetry(() => { _driver.FindElement(By.Id("importwordform")).Submit(); });
+                PerformActionWithRetry(() => {
+                    _driver.FindElementById("overwritepage").Click();
+                });
+                _driver.FindElement(By.Id("importwordform")).Submit();
             }
         }
 
@@ -229,8 +242,6 @@ namespace Confluence
                 CreatePage(asPage, Notes);
                 AttachTheOriginalFile(file.FullName);
                 AddMacroForAttachment(GetMacroType(file.Extension.ToLowerInvariant()), file.Name);
-                Debug.Assert(file.DirectoryName != null, "file.DirectoryName != null");
-                File.Move(file.FullName, Path.Combine(file.DirectoryName, file.Name + ".migrated"));
             }
 
             private static MacroType GetMacroType(string fileExt)
@@ -300,10 +311,20 @@ namespace Confluence
             {
                 PerformActionWithRetry(() =>
                 {
-                    _driver.FindElementByCssSelector("#confluence-insert-files a .toolbar-trigger.aui-button")
-                        .Click();
+                    _driver.FindElementById("editPageLink").Click();
                 });
-                _driver.FindElementsByCssSelector("#attached-files ul.file-list li.attached-file")[0].Click();
+                PerformActionWithRetry(() =>
+                {
+                    _driver.SwitchTo().Frame("wysiwygTextarea_ifr");
+                    _driver.FindElement(By.Id("tinymce")).SendKeys(Keys.Control + Keys.End);
+                    _driver.SwitchTo().ParentFrame();
+                });
+                _driver.FindElementByCssSelector("#confluence-insert-files a.toolbar-trigger.aui-button")
+                    .Click();
+                PerformActionWithRetry(() =>
+                {
+                    _driver.FindElementsByCssSelector("#attached-files ul.file-list li.attached-file")[0].Click();
+                });
                 _driver.FindElementByCssSelector(".button-panel-button.insert").Click();
                 _driver.FindElementById("rte-button-publish").Click();
             }
