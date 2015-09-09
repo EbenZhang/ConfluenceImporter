@@ -410,7 +410,7 @@ namespace Confluence
 
         private void Login()
         {
-            var loginUrl = Settings.Default.BaseAddress + (Settings.Default.IsTesting ? "/login.action" : "login");
+            var loginUrl = Settings.Default.BaseAddress + (Settings.Default.IsTesting ? "/login.action" : "/login");
 
             _driver.Navigate().GoToUrl(loginUrl);
 
