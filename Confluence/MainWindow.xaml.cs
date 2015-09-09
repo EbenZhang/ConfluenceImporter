@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
 using System.Windows;
 using Confluence.Properties;
 using log4net;
@@ -60,7 +61,7 @@ namespace Confluence
 
             private void CreateParentPages(string filePath)
             {
-                var parentPage = GetSpaceRootUrl();
+                var parentPage = "";// empty for space root page
                 var directories = filePath.Replace(Settings.Default.ImportFrom, "")
                     .Split(new[] { Path.DirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
                 foreach (var dir in directories)
@@ -199,6 +200,27 @@ namespace Confluence
             }
 
             protected abstract void DoImport(FileInfo file, string asPage);
+
+            protected void PublishPage()
+            {
+                PerformActionWithRetry(() =>
+                {
+                    _driver.FindElementById("rte-button-publish").Click();
+                    IWebElement editorIFrame = null;
+                    try
+                    {
+                        editorIFrame = _driver.FindElementById("wysiwygTextarea_ifr");
+                    }
+                    catch
+                    {// the page saved sucessfully if cannot find the iframe
+                        return;
+                    }
+                    if (editorIFrame != null)
+                    {
+                        throw new Exception("Throw exception to retry");
+                    }
+                });
+            }
         }
 
         class WordDocImporter : AbstractFileImporter
@@ -289,8 +311,23 @@ namespace Confluence
                 {
                     _driver.FindElementById("macro-viewxls").Click();
                 }
+                PerformActionWithRetry(() =>
+                {
+                    if(_driver.FindElementById("macro-param-name").Text == "No appropriate attachments")
+                    {
+                        throw new Exception("Throw an exception to try again");
+                    }
+                });
                 _driver.FindElementByCssSelector(".button-panel-button.ok").Click();
-                _driver.FindElementById("rte-button-publish").Click();
+
+                _driver.SwitchTo().Frame("wysiwygTextarea_ifr");
+
+                PerformActionWithRetry(() =>
+                {
+                    _driver.FindElementByClassName("editor-inline-macro");
+                });
+                _driver.SwitchTo().ParentFrame();
+                PublishPage();
             }
         }
 
@@ -326,7 +363,13 @@ namespace Confluence
                     _driver.FindElementsByCssSelector("#attached-files ul.file-list li.attached-file")[0].Click();
                 });
                 _driver.FindElementByCssSelector(".button-panel-button.insert").Click();
-                _driver.FindElementById("rte-button-publish").Click();
+                _driver.SwitchTo().Frame("wysiwygTextarea_ifr");
+                PerformActionWithRetry(() =>
+                {
+                    _driver.FindElementByClassName("confluence-embedded-image");
+                });
+                _driver.SwitchTo().ParentFrame();
+                PublishPage();
             }
         }
 
