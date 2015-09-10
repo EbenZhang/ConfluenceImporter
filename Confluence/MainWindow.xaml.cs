@@ -1,6 +1,8 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Windows;
 using Confluence.Properties;
@@ -16,7 +18,7 @@ namespace Confluence
         private const string Notes = @"Note: This page was imported from share point." +
             "The original document had been attached as an attachment.\r\n";
 
-        private readonly ILog _logger = LogManager.GetLogger(typeof(MainWindow));
+        public static readonly ILog Logger = LogManager.GetLogger(typeof(MainWindow));
 
         public MainWindow()
         {
@@ -45,6 +47,7 @@ namespace Confluence
         public abstract class AbstractFileImporter
         {
             protected FirefoxDriver _driver;
+            private static List<string> _createdParentPages = new List<string>();
 
             protected AbstractFileImporter(FirefoxDriver driver)
             {
@@ -54,9 +57,12 @@ namespace Confluence
             public void Import(FileInfo file, string asPage)
             {
                 CreateParentPages(file.DirectoryName);
-                DoImport(file, asPage);
-                Debug.Assert(file.DirectoryName != null, "file.DirectoryName != null");
-                file.MoveTo(Path.Combine(file.DirectoryName, file.Name + ".migrated"));
+                if (DoImport(file, asPage))
+                {
+                    Debug.Assert(file.DirectoryName != null, "file.DirectoryName != null");
+
+                    file.MoveTo(Path.Combine(file.DirectoryName, file.Name + ".migrated"));
+                }
             }
 
             private void CreateParentPages(string filePath)
@@ -64,6 +70,18 @@ namespace Confluence
                 var parentPage = "";// empty for space root page
                 var directories = filePath.Replace(Settings.Default.ImportFrom, "")
                     .Split(new[] { Path.DirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
+                if (_createdParentPages.Contains(filePath))
+                {
+                    if (directories.Any())
+                    {
+                        GotoPage(directories.Last());
+                    }
+                    else
+                    {
+                        GotoSpaceRootPage(_driver);
+                    }
+                    return;
+                }
                 foreach (var dir in directories)
                 {
                     var exists = DoesPageExist(dir);
@@ -76,6 +94,8 @@ namespace Confluence
 
                     parentPage = dir;
                 }
+                GotoPage(parentPage);
+                _createdParentPages.Add(filePath);
             }
             private bool DoesPageExist(string pageName)
             {
@@ -199,7 +219,7 @@ namespace Confluence
                 return spaceRoot;
             }
 
-            protected abstract void DoImport(FileInfo file, string asPage);
+            protected abstract bool DoImport(FileInfo file, string asPage);
 
             protected void PublishPage()
             {
@@ -229,27 +249,44 @@ namespace Confluence
             {
             }
 
-            protected override void DoImport(FileInfo file, string asPage)
+            protected override bool DoImport(FileInfo file, string asPage)
             {
-                ImportWordDoc(file.FullName, asPage);
+                return ImportWordDoc(file.FullName, asPage);
             }
 
-            private void ImportWordDoc(string wordDocPath, string asPage)
+            private bool ImportWordDoc(string wordDocPath, string asPage)
             {
                 CreatePage(asPage, "");
                 NavigateToImportWordDocPage();
-                DoImportWordDoc(wordDocPath, asPage);
-                AttachTheOriginalFile(wordDocPath);
-                AddNotesToPageToSayTheFileWasImportedFromSharepoint();
+                if (DoImportWordDoc(wordDocPath, asPage))
+                {
+                    AttachTheOriginalFile(wordDocPath);
+                    AddNotesToPageToSayTheFileWasImportedFromSharepoint();
+                    return true;
+                }
+                return false;
             }
-            private void DoImportWordDoc(string wordDocPath, string pageName)
+            private bool DoImportWordDoc(string wordDocPath, string pageName)
             {
                 PerformActionWithRetry(() => { _driver.FindElement(By.Id("filename")).SendKeys(wordDocPath); });
                 _driver.FindElement(By.Id("next")).Click();
                 PerformActionWithRetry(() => {
                     _driver.FindElementById("overwritepage").Click();
                 });
-                _driver.FindElement(By.Id("importwordform")).Submit();
+                
+                try
+                {
+                    _driver.FindElement(By.Id("importwordform")).Submit();
+                }
+                catch(OpenQA.Selenium.WebDriverException ex)
+                {
+                    var errMsg = string.Format(
+                        "Failed to import word {0}. It may be imported but confluence timeout to response."
+                        , wordDocPath);
+                    MainWindow.Logger.Error(errMsg, ex);
+                    return false;
+                }
+                return true;
             }
         }
 
@@ -259,11 +296,12 @@ namespace Confluence
             {
             }
 
-            protected override void DoImport(FileInfo file, string asPage)
+            protected override bool DoImport(FileInfo file, string asPage)
             {
                 CreatePage(asPage, Notes);
                 AttachTheOriginalFile(file.FullName);
                 AddMacroForAttachment(GetMacroType(file.Extension.ToLowerInvariant()), file.Name);
+                return true;
             }
 
             private static MacroType GetMacroType(string fileExt)
@@ -337,11 +375,12 @@ namespace Confluence
             {
             }
 
-            protected override void DoImport(FileInfo file, string asPage)
+            protected override bool DoImport(FileInfo file, string asPage)
             {
                 CreatePage(asPage, Notes);
                 AttachTheOriginalFile(file.FullName);
                 ShowImageInPage();
+                return true;
             }
 
             private void ShowImageInPage()
@@ -379,10 +418,11 @@ namespace Confluence
             {
             }
 
-            protected override void DoImport(FileInfo file, string asPage)
+            protected override bool DoImport(FileInfo file, string asPage)
             {
                 CreatePage(asPage, Notes);
-                AttachTheOriginalFile(file.FullName); 
+                AttachTheOriginalFile(file.FullName);
+                return true;
             }
         }
 
@@ -405,17 +445,24 @@ namespace Confluence
                 {
                     continue;
                 }
+                var importer = GetImporter(file.Extension);
+                if(importer == null)
+                {
+                    continue;
+                }
                 var pageName = Path.GetFileNameWithoutExtension(file.Name);
-                if (AbstractFileImporter.DoesPageExist(_driver, pageName))
+                var parentfolders = file.DirectoryName.Replace(Settings.Default.ImportFrom, "")
+                    .Split(new[] { "\\" }, StringSplitOptions.RemoveEmptyEntries).Select(r => r.ToLowerInvariant());
+                if (parentfolders.Contains(pageName.ToLowerInvariant())
+                    || AbstractFileImporter.DoesPageExist(_driver, pageName))
                 {
                     pageName = string.Format("Conflict page {0} {1}", file.Name, Guid.NewGuid().ToString());
-                    _logger.InfoFormat("Page for {0} already exists, create as {1}", 
+                    Logger.InfoFormat("Page for {0} already exists, create as {1}", 
                         file.Name, pageName);
                 }
 
                 AbstractFileImporter.GotoSpaceRootPage(_driver);
 
-                var importer = GetImporter(file);
                 if(importer != null)
                 {
                     importer.Import(file, pageName);
@@ -423,10 +470,9 @@ namespace Confluence
             }
         }
 
-        private AbstractFileImporter GetImporter(FileSystemInfo file)
+        private AbstractFileImporter GetImporter(string fileExt)
         {
             AbstractFileImporter importer = null;
-            var fileExt = file.Extension.ToLowerInvariant();
             switch (fileExt)
             {
                 case ".doc":
