@@ -27,7 +27,7 @@ namespace Confluence
         static void PerformActionWithRetry(Action action)
         {
             Exception exception = null;
-            for (var i = 0; i < 10; ++i)
+            for (var i = 0; i < 20; ++i)
             {
                 try
                 {
@@ -361,6 +361,7 @@ namespace Confluence
                         throw new Exception("Throw an exception to try again");
                     }
                 });
+                Thread.Sleep(5000);
                 _driver.FindElementByCssSelector(".button-panel-button.ok").Click();
 
                 _driver.SwitchTo().Frame("wysiwygTextarea_ifr");
