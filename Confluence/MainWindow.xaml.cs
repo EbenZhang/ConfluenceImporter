@@ -306,13 +306,18 @@ namespace Confluence
                 {
                     return MacroType.Excel;
                 }
+                else if(fileExt == ".ppt" || fileExt == ".pptx")
+                {
+                    return MacroType.Ppt;
+                }
                 return MacroType.Pdf;
             }
 
             private enum MacroType
             {
                 Pdf,
-                Excel
+                Excel,
+                Ppt
             };
 
             private void AddMacroForAttachment(MacroType macro, string fileName)
@@ -341,9 +346,13 @@ namespace Confluence
                 {
                     _driver.FindElementById("macro-viewpdf").Click();
                 }
-                else
+                else if(macro == MacroType.Excel)
                 {
                     _driver.FindElementById("macro-viewxls").Click();
+                }
+                else
+                {
+                    _driver.FindElementById("macro-viewppt").Click();
                 }
                 PerformActionWithRetry(() =>
                 {
@@ -422,6 +431,22 @@ namespace Confluence
             }
         }
 
+        class TextImporter : AbstractFileImporter
+        {
+            public TextImporter(FirefoxDriver driver) : base(driver)
+            {
+            }
+
+            protected override bool DoImport(FileInfo file, string asPage)
+            {
+                using (StreamReader textReader = new StreamReader(file.FullName))
+                {
+                    CreatePage(asPage, textReader.ReadToEnd());
+                }
+                return true;
+            }
+        }
+
         private void ButtonBase_OnClick(object sender, RoutedEventArgs e)
         {
             var dirInfo = new DirectoryInfo(Settings.Default.ImportFrom);
@@ -488,6 +513,8 @@ namespace Confluence
                 case ".xls":
                 case ".xlsx":
                 case ".pdf":
+                case ".ppt":
+                case ".pptx":
                     importer = new MacroableFileImporter(_driver);
                     break;
                 case ".jpg":
@@ -497,7 +524,14 @@ namespace Confluence
                     break;
                 case ".vsd":
                 case ".vsdx":
+                case "zip":
+                case "rtf":
+                case ".7z":
+                case "csv":
                     importer = new RegularFileImporter(_driver);
+                    break;
+                case ".txt":
+                    importer = new TextImporter(_driver);
                     break;
             }
             return importer;
