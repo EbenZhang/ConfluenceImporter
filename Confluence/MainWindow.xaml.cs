@@ -149,7 +149,7 @@ namespace Confluence
                     _driver.FindElement(By.Id("content-title")).SendKeys(pageName);
                 });
                 _driver.SwitchTo().Frame("wysiwygTextarea_ifr");
-                _driver.FindElement(By.Id("tinymce")).SendKeys(pageContent);
+                _driver.FindElement(By.Id("tinymce")).SendKeys(pageContent.Replace("\t", "    "));
                 _driver.SwitchTo().ParentFrame();
                 PublishPage();
             }
