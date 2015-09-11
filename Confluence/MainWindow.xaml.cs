@@ -84,15 +84,16 @@ namespace Confluence
                 }
                 foreach (var dir in directories)
                 {
-                    var exists = DoesPageExist(dir);
+                    var pageName = NormalizePageName(dir);
+                    var exists = DoesPageExist(pageName);
                     if (!exists)
                     {
                         GotoPage(parentPage);
 
-                        CreatePage(dir, "");
+                        CreatePage(pageName, "");
                     }
 
-                    parentPage = dir;
+                    parentPage = pageName;
                 }
                 GotoPage(parentPage);
                 _createdParentPages.Add(filePath);
@@ -150,12 +151,7 @@ namespace Confluence
                 _driver.SwitchTo().Frame("wysiwygTextarea_ifr");
                 _driver.FindElement(By.Id("tinymce")).SendKeys(pageContent);
                 _driver.SwitchTo().ParentFrame();
-                SavePage();
-            }
-            
-            private void SavePage()
-            {
-                _driver.FindElement(By.Id("rte-button-publish")).Click();
+                PublishPage();
             }
 
             protected void AddNotesToPageToSayTheFileWasImportedFromSharepoint()
@@ -176,7 +172,7 @@ namespace Confluence
 
                 textarea.SendKeys(Notes);
                 _driver.SwitchTo().ParentFrame();
-                SavePage();
+                PublishPage();
             }
             protected void AttachTheOriginalFile(string filePath)
             {
@@ -450,7 +446,7 @@ namespace Confluence
                 {
                     continue;
                 }
-                var pageName = Path.GetFileNameWithoutExtension(file.Name);
+                var pageName = NormalizePageName(Path.GetFileNameWithoutExtension(file.Name));
                 var parentfolders = file.DirectoryName.Replace(Settings.Default.ImportFrom, "")
                     .Split(new[] { "\\" }, StringSplitOptions.RemoveEmptyEntries).Select(r => r.ToLowerInvariant());
                 if (parentfolders.Contains(pageName.ToLowerInvariant())
@@ -468,6 +464,16 @@ namespace Confluence
                     importer.Import(file, pageName);
                 }
             }
+        }
+
+        private static string NormalizePageName(string pageName)
+        {
+            var newPageName = pageName.Replace(" + ", " And ").Replace("(", " ").Replace(")", " ");
+            if(newPageName != pageName)
+            {
+                Logger.InfoFormat("Page {0} was normalised to {1}", pageName, newPageName);
+            }
+            return newPageName;
         }
 
         private AbstractFileImporter GetImporter(string fileExt)
